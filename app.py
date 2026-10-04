@@ -32,6 +32,14 @@ _documents_dir = os.environ.get("IMAGE_BATCH_DOCUMENTS_DIR", "").strip()
 DOCUMENTS_DIR: Path | None = (
     Path(_documents_dir).expanduser().resolve() if _documents_dir else None
 )
+_pdf_source_roots = os.environ.get("IMAGE_BATCH_PDF_ROOTS", "").strip()
+PDF_SOURCE_ROOTS: tuple[Path, ...] = tuple(
+    dict.fromkeys(
+        Path(value.strip()).expanduser().resolve()
+        for value in _pdf_source_roots.split(os.pathsep)
+        if value.strip()
+    )
+)
 STATIC_DIR = APP_DIR / "static"
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_BATCH_FILES = 2000
@@ -1133,6 +1141,39 @@ def _decode_batch_item(row: sqlite3.Row) -> dict[str, Any]:
     return payload
 
 
+def _matching_pdf_source_root(path: Path) -> Path | None:
+    resolved = path.expanduser().resolve()
+    for root in PDF_SOURCE_ROOTS:
+        try:
+            resolved.relative_to(root)
+            return root
+        except ValueError:
+            continue
+    return None
+
+
+def _add_batch_item_source_group(
+    state: dict[str, Any],
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    if state.get("source_kind") != "folder":
+        item["source_group"] = "浏览器上传"
+        item["source_relative_path"] = item.get("filename", "")
+        return item
+
+    source_path = Path(str(item.get("source_path") or "")).expanduser().resolve()
+    source_root = Path(str(state.get("source_label") or "")).expanduser().resolve()
+    try:
+        relative_path = source_path.relative_to(source_root)
+        relative_parent = relative_path.parent.as_posix()
+        item["source_group"] = "根目录" if relative_parent == "." else relative_parent
+        item["source_relative_path"] = relative_path.as_posix()
+    except ValueError:
+        item["source_group"] = source_path.parent.name or "其他目录"
+        item["source_relative_path"] = source_path.name
+    return item
+
+
 def _job_review_summary(job_id: str) -> dict[str, Any]:
     """Return lightweight annotation progress for the history navigation."""
     summary = {
@@ -1231,7 +1272,10 @@ def load_batch_state(
             """,
             (batch_id, size, start),
         ).fetchall()
-        state["items"] = [_decode_batch_item(item) for item in rows]
+        state["items"] = [
+            _add_batch_item_source_group(state, _decode_batch_item(item))
+            for item in rows
+        ]
         state["items_offset"] = start
         state["items_returned"] = len(rows)
         state["items_total"] = int(state.get("total") or 0)
@@ -1474,6 +1518,96 @@ def health() -> dict[str, Any]:
         "dpi": 300,
         "default_workers": DEFAULT_BATCH_WORKERS,
         "max_workers": MAX_BATCH_WORKERS,
+        "pdf_source_roots": [str(root) for root in PDF_SOURCE_ROOTS],
+    }
+
+
+@app.get("/api/server-folders")
+def list_server_folders(path: str = "") -> dict[str, Any]:
+    """List folders below explicitly configured PDF source roots."""
+    roots = [
+        {
+            "name": root.name or str(root),
+            "path": str(root),
+            "available": root.is_dir(),
+        }
+        for root in PDF_SOURCE_ROOTS
+    ]
+    available_roots = [root for root in PDF_SOURCE_ROOTS if root.is_dir()]
+    if not PDF_SOURCE_ROOTS:
+        return {
+            "configured": False,
+            "roots": [],
+            "current": None,
+            "parent": None,
+            "directories": [],
+            "pdf_count": 0,
+            "message": "尚未配置 IMAGE_BATCH_PDF_ROOTS，可继续手动输入服务器路径。",
+        }
+    if not available_roots:
+        return {
+            "configured": True,
+            "roots": roots,
+            "current": None,
+            "parent": None,
+            "directories": [],
+            "pdf_count": 0,
+            "message": "已配置的 PDF 根目录均不存在或不可访问。",
+        }
+
+    current = Path(path).expanduser().resolve() if path.strip() else available_roots[0]
+    matching_root = _matching_pdf_source_root(current)
+    if matching_root is None:
+        raise HTTPException(status_code=403, detail="只能浏览已配置的 PDF 根目录")
+    if not current.is_dir():
+        raise HTTPException(status_code=404, detail=f"服务器目录不存在：{current}")
+
+    try:
+        children = list(current.iterdir())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=f"没有权限读取目录：{current}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"目录读取失败：{current}") from exc
+
+    directory_entries: list[dict[str, Any]] = []
+    direct_pdf_count = 0
+    for child in children:
+        try:
+            resolved_child = child.resolve()
+            if child.is_file() and child.suffix.lower() == ".pdf":
+                direct_pdf_count += 1
+                continue
+            if not child.is_dir() or _matching_pdf_source_root(resolved_child) is None:
+                continue
+            child_pdf_count = sum(
+                1
+                for candidate in child.iterdir()
+                if candidate.is_file() and candidate.suffix.lower() == ".pdf"
+            )
+            directory_entries.append(
+                {
+                    "name": child.name,
+                    "path": str(resolved_child),
+                    "pdf_count": child_pdf_count,
+                }
+            )
+        except (OSError, PermissionError):
+            continue
+
+    parent: str | None = None
+    if current != matching_root:
+        candidate_parent = current.parent.resolve()
+        if _matching_pdf_source_root(candidate_parent) is not None:
+            parent = str(candidate_parent)
+    return {
+        "configured": True,
+        "roots": roots,
+        "current": str(current),
+        "current_name": current.name or str(current),
+        "parent": parent,
+        "directories": sorted(directory_entries, key=lambda entry: entry["name"].casefold()),
+        "pdf_count": direct_pdf_count,
+        "message": "",
     }
 
 
@@ -1593,6 +1727,8 @@ async def create_upload_batch(
 @app.post("/api/batches/folder")
 def create_folder_batch(request: FolderBatchRequest) -> dict[str, Any]:
     folder = Path(request.folder).expanduser().resolve()
+    if PDF_SOURCE_ROOTS and _matching_pdf_source_root(folder) is None:
+        raise HTTPException(status_code=403, detail="只能处理已配置 PDF 根目录中的文件夹")
     if not folder.is_dir():
         raise HTTPException(status_code=404, detail=f"PDF 文件夹不存在：{folder}")
     iterator = folder.rglob("*.pdf") if request.recursive else folder.glob("*.pdf")

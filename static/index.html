@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Image Batch · 科研子图批处理</title>
-  <link rel="stylesheet" href="static/app.css?v=20261004.6">
+  <link rel="stylesheet" href="static/app.css?v=20261004.7">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="static/app.js?v=20261004.6" defer></script>
+  <script src="static/app.js?v=20261004.7" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -36,7 +36,7 @@
           <i data-lucide="refresh-cw"></i><span class="fallback-icon">↻</span>
         </button>
       </div>
-      <p class="analysis-sidebar-help">按处理日期归档。展开日期和批次，点击文献即可继续校验。</p>
+      <p class="analysis-sidebar-help">按处理日期、批次和来源目录归档。逐层展开后，点击文献即可继续校验。</p>
       <nav id="batchHistory" class="analysis-history" aria-label="已分析文献导航">
         <div class="history-loading"><span class="spinner"></span><span>正在读取解析记录…</span></div>
       </nav>
@@ -49,7 +49,10 @@
         <span>300 DPI 整图提取 → 自动子图划分 → 人工框选复核</span>
       </div>
       <div class="batch-folder-row">
-        <input id="folderInput" type="text" placeholder="服务器 PDF 文件夹，例如 D:\papers" aria-label="服务器 PDF 文件夹">
+        <div class="folder-path-field">
+          <input id="folderInput" type="text" placeholder="选择或输入服务器 PDF 文件夹" aria-label="服务器 PDF 文件夹">
+          <button id="browseFolder" class="secondary-button" type="button">选择目录</button>
+        </div>
         <label class="inline-check"><input id="recursiveInput" type="checkbox">包含子文件夹</label>
         <label class="worker-field">并发 <input id="concurrencyInput" type="number" min="1" max="32" value="4"></label>
         <button id="folderStart" class="primary-button" type="button">处理文件夹</button>
@@ -104,6 +107,33 @@
     </form>
     <p class="composer-note">自动结果会完整落盘；低于 0.70 的面板建议进入框选编辑器人工复核。</p>
   </footer>
+
+  <dialog id="folderBrowserDialog" class="folder-browser-dialog" aria-labelledby="folderBrowserTitle">
+    <div class="folder-browser-header">
+      <div>
+        <span>服务器文件系统</span>
+        <h2 id="folderBrowserTitle">选择 PDF 目录</h2>
+      </div>
+      <button id="closeFolderBrowser" class="icon-button" type="button" aria-label="关闭目录选择" title="关闭">
+        <i data-lucide="x"></i><span class="fallback-icon">×</span>
+      </button>
+    </div>
+    <div class="folder-browser-body">
+      <div id="folderRootList" class="folder-root-list" aria-label="可用的 PDF 根目录"></div>
+      <div class="folder-browser-toolbar">
+        <button id="folderUp" class="icon-button" type="button" title="返回上级目录" aria-label="返回上级目录" disabled>
+          <i data-lucide="arrow-up"></i><span class="fallback-icon">↑</span>
+        </button>
+        <strong id="folderCurrentPath">尚未选择目录</strong>
+      </div>
+      <p id="folderBrowserMessage" class="folder-browser-message" role="status"></p>
+      <div id="folderDirectoryList" class="folder-directory-list"></div>
+    </div>
+    <div class="folder-browser-footer">
+      <span id="folderPdfCount">当前目录 0 篇 PDF</span>
+      <button id="chooseFolder" class="primary-button" type="button" disabled>选择当前目录</button>
+    </div>
+  </dialog>
 
   <dialog id="editorDialog" class="editor-dialog" aria-labelledby="editorTitle">
     <div class="editor-header">

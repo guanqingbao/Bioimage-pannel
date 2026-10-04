@@ -61,12 +61,85 @@ class ImageBatchTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["queued"], 2)
         self.assertEqual(len(payload["items"]), 2)
         self.assertEqual(payload["source_kind"], "folder")
+        self.assertEqual({item["source_group"] for item in payload["items"]}, {"根目录"})
         self.assertTrue(start_batch.called)
 
         paged = self.client.get(f"/api/batches/{payload['batch_id']}?offset=1&limit=1")
         self.assertEqual(paged.status_code, 200, paged.text)
         self.assertEqual(paged.json()["items_returned"], 1)
         self.assertEqual(paged.json()["items_total"], 2)
+
+    def test_server_folder_browser_is_restricted_to_configured_roots(self) -> None:
+        source_root = Path(self.temporary.name) / "pdfs"
+        category = source_root / "group-a"
+        category.mkdir(parents=True)
+        (source_root / "root.pdf").write_bytes(b"%PDF-1.7\n")
+        (category / "nested.pdf").write_bytes(b"%PDF-1.7\n")
+        outside = Path(self.temporary.name) / "outside"
+        outside.mkdir()
+        (outside / "private.pdf").write_bytes(b"%PDF-1.7\n")
+
+        with patch.object(
+            image_batch_app,
+            "PDF_SOURCE_ROOTS",
+            (source_root.resolve(),),
+        ):
+            root_response = self.client.get("/api/server-folders")
+            nested_response = self.client.get(
+                "/api/server-folders",
+                params={"path": str(category)},
+            )
+            forbidden_browser = self.client.get(
+                "/api/server-folders",
+                params={"path": str(outside)},
+            )
+            with patch.object(image_batch_app, "_start_batch") as start_batch:
+                forbidden_batch = self.client.post(
+                    "/api/batches/folder",
+                    json={"folder": str(outside), "recursive": False, "concurrency": 1},
+                )
+
+        self.assertEqual(root_response.status_code, 200, root_response.text)
+        root_payload = root_response.json()
+        self.assertTrue(root_payload["configured"])
+        self.assertEqual(root_payload["current"], str(source_root.resolve()))
+        self.assertEqual(root_payload["pdf_count"], 1)
+        self.assertEqual(root_payload["directories"][0]["name"], "group-a")
+        self.assertEqual(root_payload["directories"][0]["pdf_count"], 1)
+        self.assertEqual(nested_response.status_code, 200, nested_response.text)
+        self.assertEqual(nested_response.json()["parent"], str(source_root.resolve()))
+        self.assertEqual(forbidden_browser.status_code, 403)
+        self.assertEqual(forbidden_batch.status_code, 403)
+        start_batch.assert_not_called()
+
+    def test_recursive_folder_batch_records_relative_directory_groups(self) -> None:
+        source_root = Path(self.temporary.name) / "pdfs"
+        first_group = source_root / "experiment-a"
+        second_group = source_root / "experiment-b" / "day-1"
+        first_group.mkdir(parents=True)
+        second_group.mkdir(parents=True)
+        (first_group / "one.pdf").write_bytes(b"%PDF-1.7\n")
+        (second_group / "two.pdf").write_bytes(b"%PDF-1.7\n")
+
+        with patch.object(
+            image_batch_app,
+            "PDF_SOURCE_ROOTS",
+            (source_root.resolve(),),
+        ), patch.object(image_batch_app, "_start_batch"):
+            response = self.client.post(
+                "/api/batches/folder",
+                json={"folder": str(source_root), "recursive": True, "concurrency": 2},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        items = {item["filename"]: item for item in response.json()["items"]}
+        self.assertEqual(items["one.pdf"]["source_group"], "experiment-a")
+        self.assertEqual(items["one.pdf"]["source_relative_path"], "experiment-a/one.pdf")
+        self.assertEqual(items["two.pdf"]["source_group"], "experiment-b/day-1")
+        self.assertEqual(
+            items["two.pdf"]["source_relative_path"],
+            "experiment-b/day-1/two.pdf",
+        )
 
     def test_batch_worker_writes_result_and_metrics(self) -> None:
         source = Path(self.temporary.name) / "paper.pdf"

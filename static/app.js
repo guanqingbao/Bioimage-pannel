@@ -33,6 +33,16 @@ const resetSelectionButton = document.querySelector('#resetSelection');
 const deletePanelButton = document.querySelector('#deletePanel');
 const confirmCropButton = document.querySelector('#confirmCrop');
 const folderInput = document.querySelector('#folderInput');
+const browseFolderButton = document.querySelector('#browseFolder');
+const folderBrowserDialog = document.querySelector('#folderBrowserDialog');
+const closeFolderBrowserButton = document.querySelector('#closeFolderBrowser');
+const folderRootList = document.querySelector('#folderRootList');
+const folderCurrentPath = document.querySelector('#folderCurrentPath');
+const folderUpButton = document.querySelector('#folderUp');
+const folderBrowserMessage = document.querySelector('#folderBrowserMessage');
+const folderDirectoryList = document.querySelector('#folderDirectoryList');
+const folderPdfCount = document.querySelector('#folderPdfCount');
+const chooseFolderButton = document.querySelector('#chooseFolder');
 const recursiveInput = document.querySelector('#recursiveInput');
 const concurrencyInput = document.querySelector('#concurrencyInput');
 const folderStartButton = document.querySelector('#folderStart');
@@ -64,6 +74,7 @@ const resultSessions = new Map();
 const navigationBatchCache = new Map();
 let activeBatchId = '';
 let batchPollTimer = null;
+let folderBrowserState = null;
 
 const icon = (name) => `<i data-lucide="${name}"></i>`;
 const refreshIcons = () => window.lucide?.createIcons();
@@ -120,9 +131,12 @@ function renderBatchState(state) {
   const rows = Array.isArray(state.items) ? state.items : [];
   batchItems.innerHTML = rows.map(item => {
     const metrics = item.metrics || {};
-    const details = item.status === 'completed'
+    const processingDetails = item.status === 'completed'
       ? `${metrics.figures || 0} 整图 · ${metrics.panels || 0} 子图 · ${metrics.needs_review || 0} 待复核`
       : item.error || batchStatusLabel(item.status);
+    const details = item.source_group && item.source_group !== '浏览器上传'
+      ? `${item.source_group} · ${processingDetails}`
+      : processingDetails;
     const action = item.status === 'completed'
       ? `<button class="open-job-button secondary-button" type="button" data-job-id="${escapeHtml(item.job_id)}">打开结果</button>`
       : '';
@@ -234,6 +248,29 @@ function navigationJobMarkup(item) {
     </button>`;
 }
 
+function navigationDirectoryMarkup(name, items, index) {
+  return `
+    <details class="analysis-directory-group"${index === 0 ? ' open' : ''}>
+      <summary>
+        <span>${icon('folder')}<strong title="${escapeHtml(name)}">${escapeHtml(name)}</strong></span>
+        <small>${items.length} 篇</small>
+      </summary>
+      <div class="analysis-directory-jobs">${items.map(navigationJobMarkup).join('')}</div>
+    </details>`;
+}
+
+function groupedNavigationMarkup(items) {
+  const groups = new Map();
+  items.forEach(item => {
+    const name = item.source_group || '未分类';
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(item);
+  });
+  return Array.from(groups.entries())
+    .map(([name, groupedItems], index) => navigationDirectoryMarkup(name, groupedItems, index))
+    .join('');
+}
+
 async function loadNavigationBatch(details, force = false) {
   const batchId = details?.dataset.navigationBatchId;
   const target = details?.querySelector('.analysis-job-list');
@@ -254,7 +291,7 @@ async function loadNavigationBatch(details, force = false) {
       offset = items.length;
     } while (offset < total);
     navigationBatchCache.set(batchId, items);
-    target.innerHTML = items.map(navigationJobMarkup).join('') || '<div class="history-empty">这个批次还没有文献</div>';
+    target.innerHTML = groupedNavigationMarkup(items) || '<div class="history-empty">这个批次还没有文献</div>';
     target.dataset.loaded = 'true';
     refreshIcons();
   } catch (error) {
@@ -377,6 +414,76 @@ async function startFolderBatch() {
     setBatchStatus(error.message, true);
   } finally {
     folderStartButton.disabled = false;
+  }
+}
+
+function renderServerFolders(state) {
+  folderBrowserState = state;
+  folderRootList.innerHTML = (state.roots || []).map(root => `
+    <button type="button" class="folder-root-button${root.path === state.current ? ' active' : ''}"
+      data-folder-path="${escapeHtml(root.path)}"${root.available ? '' : ' disabled'}>
+      ${icon('hard-drive')}<span>${escapeHtml(root.name)}</span>
+    </button>`).join('');
+  folderCurrentPath.textContent = state.current || '尚未选择目录';
+  folderUpButton.disabled = !state.parent;
+  folderBrowserMessage.textContent = state.message || '';
+  folderBrowserMessage.hidden = !state.message;
+  folderDirectoryList.innerHTML = (state.directories || []).map(directory => `
+    <button type="button" class="folder-directory-button" data-folder-path="${escapeHtml(directory.path)}">
+      ${icon('folder')}<span><strong>${escapeHtml(directory.name)}</strong><small>${Number(directory.pdf_count || 0)} 篇 PDF</small></span>
+      ${icon('chevron-right')}
+    </button>`).join('') || (state.current
+      ? '<div class="folder-directory-empty">当前目录没有子目录</div>'
+      : '');
+  folderPdfCount.textContent = state.current
+    ? `当前目录 ${Number(state.pdf_count || 0)} 篇 PDF`
+    : '当前目录不可用';
+  chooseFolderButton.disabled = !state.current;
+  refreshIcons();
+}
+
+async function loadServerFolders(path = '') {
+  folderBrowserMessage.hidden = false;
+  folderBrowserMessage.textContent = '正在读取服务器目录…';
+  folderDirectoryList.innerHTML = '<div class="history-loading"><span class="spinner"></span><span>正在读取目录…</span></div>';
+  const query = path ? `?path=${encodeURIComponent(path)}` : '';
+  const response = await fetch(appUrl(`/api/server-folders${query}`));
+  const state = await response.json();
+  if (!response.ok) throw new Error(state.detail || '服务器目录读取失败');
+  renderServerFolders(state);
+  return state;
+}
+
+async function navigateServerFolder(path) {
+  try {
+    await loadServerFolders(path);
+  } catch (error) {
+    folderBrowserMessage.hidden = false;
+    folderBrowserMessage.textContent = error.message;
+  }
+}
+
+async function openFolderBrowser() {
+  folderBrowserDialog.showModal();
+  refreshIcons();
+  const requestedPath = folderInput.value.trim();
+  try {
+    await loadServerFolders(requestedPath);
+  } catch (error) {
+    if (requestedPath) {
+      try {
+        await loadServerFolders();
+        folderBrowserMessage.hidden = false;
+        folderBrowserMessage.textContent = `${error.message}，已返回默认根目录。`;
+        return;
+      } catch (fallbackError) {
+        folderBrowserMessage.textContent = fallbackError.message;
+      }
+    } else {
+      folderBrowserMessage.textContent = error.message;
+    }
+    folderDirectoryList.innerHTML = '';
+    chooseFolderButton.disabled = true;
   }
 }
 
@@ -1143,6 +1250,25 @@ messages.addEventListener('click', event => {
   openPanelEditor(button.dataset.jobId, button.dataset.recordId, button.closest('.message-body'));
 });
 closeEditorButton.addEventListener('click', () => editorDialog.close());
+closeFolderBrowserButton.addEventListener('click', () => folderBrowserDialog.close());
+browseFolderButton.addEventListener('click', openFolderBrowser);
+folderUpButton.addEventListener('click', () => {
+  if (folderBrowserState?.parent) navigateServerFolder(folderBrowserState.parent);
+});
+folderRootList.addEventListener('click', event => {
+  const button = event.target.closest('[data-folder-path]');
+  if (button && !button.disabled) navigateServerFolder(button.dataset.folderPath);
+});
+folderDirectoryList.addEventListener('click', event => {
+  const button = event.target.closest('[data-folder-path]');
+  if (button) navigateServerFolder(button.dataset.folderPath);
+});
+chooseFolderButton.addEventListener('click', () => {
+  if (!folderBrowserState?.current) return;
+  folderInput.value = folderBrowserState.current;
+  folderBrowserDialog.close();
+  setBatchStatus(`已选择服务器目录：${folderBrowserState.current}`);
+});
 resetSelectionButton.addEventListener('click', resetEditorSelection);
 deletePanelButton.addEventListener('click', deleteCurrentPanel);
 confirmCropButton.addEventListener('click', confirmManualCrop);

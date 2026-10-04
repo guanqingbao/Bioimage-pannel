@@ -11,6 +11,10 @@ if [[ ! -x "$python_bin" ]]; then
 fi
 
 export IMAGE_BATCH_DATA_DIR="${IMAGE_BATCH_DATA_DIR:-$project_dir/data}"
+if [[ -z "${IMAGE_BATCH_PDF_ROOTS:-}" ]]; then
+  export IMAGE_BATCH_PDF_ROOTS="$project_dir/pdfs"
+  mkdir -p "$IMAGE_BATCH_PDF_ROOTS"
+fi
 host="${IMAGE_BATCH_HOST:-127.0.0.1}"
 port="${IMAGE_BATCH_PORT:-8010}"
 
