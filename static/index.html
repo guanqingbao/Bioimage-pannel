@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Image Batch · 科研子图批处理</title>
+  <link rel="stylesheet" href="static/app.css?v=20261004.6">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  <script src="static/app.js?v=20261004.6" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">IB</span>
+      <div>
+        <strong>Image Batch</strong>
+        <span id="serviceStatus">正在连接</span>
+      </div>
+    </div>
+    <button id="newChat" class="icon-button" type="button" title="新建检测" aria-label="新建检测">
+      <i data-lucide="square-pen"></i><span class="fallback-icon">+</span>
+    </button>
+  </header>
+
+  <div class="app-layout">
+    <aside class="analysis-sidebar" aria-labelledby="analysisHistoryTitle">
+      <div class="analysis-sidebar-header">
+        <button id="sidebarToggle" class="icon-button sidebar-toggle" type="button" title="收起左侧导航" aria-label="收起左侧导航" aria-expanded="true">
+          <i data-lucide="panel-left-close"></i><span class="fallback-icon">‹</span>
+        </button>
+        <div>
+          <span>解析记录</span>
+          <strong id="analysisHistoryTitle">已分析文献</strong>
+        </div>
+        <button id="historyRefresh" class="icon-button" type="button" title="刷新解析记录" aria-label="刷新解析记录">
+          <i data-lucide="refresh-cw"></i><span class="fallback-icon">↻</span>
+        </button>
+      </div>
+      <p class="analysis-sidebar-help">按处理日期归档。展开日期和批次，点击文献即可继续校验。</p>
+      <nav id="batchHistory" class="analysis-history" aria-label="已分析文献导航">
+        <div class="history-loading"><span class="spinner"></span><span>正在读取解析记录…</span></div>
+      </nav>
+    </aside>
+
+    <main class="chat-shell">
+    <section class="document-source batch-console" aria-labelledby="documentSourceTitle">
+      <div>
+        <strong id="documentSourceTitle">PDF 批量工作台</strong>
+        <span>300 DPI 整图提取 → 自动子图划分 → 人工框选复核</span>
+      </div>
+      <div class="batch-folder-row">
+        <input id="folderInput" type="text" placeholder="服务器 PDF 文件夹，例如 D:\papers" aria-label="服务器 PDF 文件夹">
+        <label class="inline-check"><input id="recursiveInput" type="checkbox">包含子文件夹</label>
+        <label class="worker-field">并发 <input id="concurrencyInput" type="number" min="1" max="32" value="4"></label>
+        <button id="folderStart" class="primary-button" type="button">处理文件夹</button>
+      </div>
+      <div class="batch-toolbar">
+        <span id="batchStatus" role="status">可上传多个 PDF，或直接处理服务器文件夹。</span>
+        <button id="refreshBatches" class="secondary-button" type="button">刷新批次</button>
+      </div>
+      <div class="collection-toolbar">
+        <span id="collectionStatus">训练素材库尚未整理</span>
+        <button id="rebuildCollection" class="secondary-button" type="button">整理训练数据</button>
+      </div>
+      <div id="batchProgress" class="batch-progress" hidden>
+        <div class="batch-progress-head"><strong id="batchTitle">当前批次</strong><span id="batchPercent">0%</span></div>
+        <div class="batch-progress-track"><span id="batchProgressBar"></span></div>
+        <div id="batchItems" class="batch-items"></div>
+      </div>
+    </section>
+    <section id="messages" class="messages" aria-live="polite">
+      <article class="message assistant-message">
+        <div class="avatar">AI</div>
+        <div class="message-body">
+          <p>批量上传 PDF 后，系统会在本机提取 300 DPI 整图、自动划分 A–Z 子图，并把需要人工复核的结果保留下来。</p>
+          <div class="quick-facts">
+            <span>多 PDF</span><span>单篇最大 80 MB</span><span>本地确定性处理</span>
+          </div>
+        </div>
+      </article>
+    </section>
+    </main>
+  </div>
+
+  <footer class="composer-wrap">
+    <form id="composer" class="composer">
+      <input id="fileInput" type="file" accept=".pdf" multiple hidden>
+      <button id="attachButton" class="icon-button attach" type="button" title="选择多个 PDF" aria-label="选择多个 PDF">
+        <i data-lucide="paperclip"></i><span class="fallback-icon">+</span>
+      </button>
+      <div class="composer-content">
+        <div id="selectedFile" class="selected-file" hidden>
+          <i data-lucide="file"></i>
+          <span id="selectedFileName"></span>
+          <button id="removeFile" type="button" aria-label="移除文件" title="移除文件">
+            <i data-lucide="x"></i><span class="fallback-icon">×</span>
+          </button>
+        </div>
+        <textarea id="prompt" rows="1" placeholder="选择多个 PDF 后创建批次" aria-label="批次备注"></textarea>
+      </div>
+      <button id="sendButton" class="send-button" type="submit" title="发送" aria-label="发送" disabled>
+        <i data-lucide="arrow-up"></i><span class="fallback-icon">↑</span>
+      </button>
+    </form>
+    <p class="composer-note">自动结果会完整落盘；低于 0.70 的面板建议进入框选编辑器人工复核。</p>
+  </footer>
+
+  <dialog id="editorDialog" class="editor-dialog" aria-labelledby="editorTitle">
+    <div class="editor-header">
+      <div>
+        <span class="editor-kicker">人工复核</span>
+        <h2 id="editorTitle">在整图上框选子图</h2>
+        <p id="editorSourceName"></p>
+      </div>
+      <button id="closeEditor" class="icon-button" type="button" aria-label="关闭编辑器" title="关闭">
+        <i data-lucide="x"></i><span class="fallback-icon">×</span>
+      </button>
+    </div>
+    <div class="editor-layout">
+      <section class="editor-workspace" aria-label="整图框选区域">
+        <div class="editor-stage-scroll">
+          <div id="editorStage" class="editor-stage">
+            <img id="editorImage" alt="待框选的完整科研图片" draggable="false">
+            <canvas id="editorCanvas" aria-label="在整图上拖拽画框"></canvas>
+          </div>
+        </div>
+        <p class="editor-help">按住鼠标或手指拖拽画框。框选坐标按照原始图片像素保存，不受页面缩放影响。</p>
+      </section>
+      <aside class="editor-sidebar">
+        <label class="field-label" for="editorLabel">要替换的面板标签</label>
+        <input id="editorLabel" class="editor-label-input" list="editorLabelOptions" maxlength="1" autocomplete="off" placeholder="例如 A">
+        <datalist id="editorLabelOptions"></datalist>
+
+        <div class="editor-current">
+          <div class="editor-section-title"><span>当前版本</span><strong id="editorCurrentVersion">未生成</strong></div>
+          <img id="editorCurrentImage" alt="当前面板版本" hidden>
+          <p id="editorCurrentEmpty">这个标签还没有图片，确认后将创建第一个人工版本。</p>
+        </div>
+
+        <div id="understandingEditor" class="understanding-editor">
+          <div class="editor-section-title"><span>图片理解（人工填写）</span><strong id="understandingCurrentVersion">尚未填写</strong></div>
+          <textarea id="panelUnderstanding" maxlength="20000" rows="5" placeholder="例如：该子图展示了实验组与对照组的肿瘤体积变化；主要结果是……"></textarea>
+          <button id="saveUnderstanding" class="secondary-button understanding-save-button" type="button" disabled>确认并保存理解新版本</button>
+          <details class="understanding-history-wrap">
+            <summary>查看理解历史（全部保留）</summary>
+            <div id="understandingHistory" class="understanding-history"></div>
+          </details>
+        </div>
+
+        <div class="editor-preview">
+          <div class="editor-section-title"><span>框选预览</span><strong id="editorSelectionSize">尚未框选</strong></div>
+          <canvas id="editorPreviewCanvas" hidden></canvas>
+          <div id="editorPreviewEmpty" class="preview-empty">在左侧整图上拖出一个矩形区域</div>
+        </div>
+
+        <div class="editor-history-wrap">
+          <div class="editor-section-title"><span>版本历史</span><strong>全部保留</strong></div>
+          <div id="editorHistory" class="editor-history"></div>
+        </div>
+
+        <p id="editorError" class="error-text editor-error" role="alert"></p>
+        <div class="editor-actions">
+          <button id="resetSelection" class="secondary-button" type="button">重新框选</button>
+          <button id="deletePanel" class="danger-button" type="button" disabled>删除当前面板</button>
+          <button id="confirmCrop" class="primary-button" type="button" disabled>确认并保存新版本</button>
+        </div>
+      </aside>
+    </div>
+  </dialog>
+
+  <template id="userMessageTemplate">
+    <article class="message user-message"><div class="message-body"></div></article>
+  </template>
+  <template id="assistantMessageTemplate">
+    <article class="message assistant-message">
+      <div class="avatar">AI</div>
+      <div class="message-body"></div>
+    </article>
+  </template>
+</body>
+</html>
