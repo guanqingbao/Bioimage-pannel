@@ -442,6 +442,7 @@ def collect_image_block_candidates(
         page_number = page_index + 1
         if pages and page_number not in pages:
             continue
+        page_blocks: list[ImageBlockCandidate] = []
         for block_index, block in enumerate(page.get_text("dict").get("blocks", []), 1):
             if block.get("type") != 1 or "bbox" not in block:
                 continue
@@ -452,7 +453,7 @@ def collect_image_block_candidates(
                 or rect.get_area() < MIN_CLUSTER_BLOCK_AREA_PT2
             ):
                 continue
-            raw.append(
+            page_blocks.append(
                 ImageBlockCandidate(
                     page_number=page_number,
                     block_index=block_index,
@@ -460,6 +461,36 @@ def collect_image_block_candidates(
                     member_block_indices=(block_index,),
                 )
             )
+        # PyMuPDF's text dictionary omits image blocks whose placement extends
+        # beyond the PDF page, even though their visible portion is rendered.
+        # XObject placement rectangles retain these clipped figures.
+        fallback_index = 100000
+        for image in page.get_images(full=True):
+            for placement in page.get_image_rects(image[0]):
+                rect = placement & page.rect
+                if (
+                    rect.is_empty
+                    or rect.width < MIN_CLUSTER_BLOCK_SIDE_PT
+                    or rect.height < MIN_CLUSTER_BLOCK_SIDE_PT
+                    or rect.get_area() < MIN_CLUSTER_BLOCK_AREA_PT2
+                ):
+                    continue
+                if any(
+                    (rect & fitz.Rect(block.bbox_pt)).get_area()
+                    >= 0.90 * min(rect.get_area(), fitz.Rect(block.bbox_pt).get_area())
+                    for block in page_blocks
+                ):
+                    continue
+                fallback_index += 1
+                page_blocks.append(
+                    ImageBlockCandidate(
+                        page_number=page_number,
+                        block_index=fallback_index,
+                        bbox_pt=tuple(float(value) for value in rect),
+                        member_block_indices=(fallback_index,),
+                    )
+                )
+        raw.extend(page_blocks)
     return cluster_image_block_candidates(
         raw,
         min_width_pt,
@@ -468,6 +499,42 @@ def collect_image_block_candidates(
         scheme_min_width_pt=scheme_min_width_pt,
         scheme_min_height_pt=scheme_min_height_pt,
     )
+
+
+def match_caption_to_previous_page_figure(
+    document: fitz.Document,
+    caption: Caption,
+    candidates: list[ImageBlockCandidate],
+    consumed: set[tuple[int, int]],
+) -> ImageBlockCandidate | None:
+    """Own a dominant preceding-page raster when the caption starts next page."""
+    if caption.page_number <= 1:
+        return None
+    caption_page = document[caption.page_number - 1]
+    if caption.bbox_pt[1] > caption_page.rect.y0 + 0.28 * caption_page.rect.height:
+        return None
+    previous_page = document[caption.page_number - 2]
+    ranked: list[tuple[float, ImageBlockCandidate]] = []
+    for candidate in candidates:
+        if candidate.page_number != caption.page_number - 1:
+            continue
+        if image_block_is_consumed(candidate, consumed):
+            continue
+        rect = fitz.Rect(candidate.bbox_pt)
+        page_rect = previous_page.rect
+        if (
+            rect.width < 0.65 * page_rect.width
+            or rect.get_area() < 0.20 * page_rect.get_area()
+            or rect.y1 < page_rect.y0 + 0.70 * page_rect.height
+        ):
+            continue
+        score = _cross_page_candidate_score(document, caption, candidate)
+        if score >= 10.0:
+            ranked.append((score, candidate))
+    ranked.sort(key=lambda item: -item[0])
+    if not ranked or (len(ranked) > 1 and ranked[1][0] >= ranked[0][0] - 1.0):
+        return None
+    return ranked[0][1]
 
 def caption_bbox_on_page(caption: Caption, page_number: int) -> BBox | None:
     segments = caption_segments_on_page(caption, page_number)

@@ -379,12 +379,34 @@ def _match_caption_conservatively(
     consumed: set[tuple[int, int]],
 ) -> ImageBlockCandidate | None:
     """Delegate ownership to the proven legacy high-precision matcher."""
-    return matching_ops.match_caption_to_image_block_conservative(
+    matched = matching_ops.match_caption_to_image_block_conservative(
         document,
         caption,
         candidates,
         consumed,
     )
+    if matched is not None:
+        return matched
+    return matching_ops.match_caption_to_previous_page_figure(
+        document,
+        caption,
+        candidates,
+        consumed,
+    )
+
+
+def _source_image_clipped_by_page(page: fitz.Page, figure_rect: fitz.Rect) -> bool:
+    """Detect an XObject extending beyond the printable page boundary."""
+    if figure_rect.y1 < page.rect.y1 - 3.0:
+        return False
+    for image in page.get_images(full=True):
+        for placement in page.get_image_rects(image[0]):
+            if placement.y1 <= page.rect.y1 + 2.0:
+                continue
+            visible = placement & page.rect
+            if not visible.is_empty and (visible & figure_rect).get_area() >= 0.70 * visible.get_area():
+                return True
+    return False
 
 
 def _find_conservative_caption_crop(
@@ -684,6 +706,8 @@ def extract_pdf_figures(
                 flags: list[str] = []
                 if grouped.page_number != caption.page_number:
                     flags.append("cross_page_caption_match")
+                if _source_image_clipped_by_page(matched_page, initial_rect):
+                    flags.append("source_image_clipped_by_page")
                 if caption.end_page_number != caption.page_number:
                     flags.append("caption_spans_pages")
                 if set(source_indices) != set(model_types.image_block_indices(matched)):
@@ -816,7 +840,7 @@ def extract_pdf_figures(
             expected_labels = (
                 caption_ops.parse_expected_panel_labels(caption.text) if caption else []
             )
-            if caption is not None and item.block_index >= 10000:
+            if caption is not None and 10000 <= item.block_index < 100000:
                 method = "caption_crop"
                 flags = ["synthetic_caption_crop", *item.quality_flags]
             elif caption is not None and len(item.source_block_indices) > 1:

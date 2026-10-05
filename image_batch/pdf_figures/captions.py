@@ -190,6 +190,13 @@ def _cross_page_continuation_score(
         score -= 2.2
     if len(candidate_text) <= 400:
         score += 0.5
+    if (
+        candidate_text.startswith("(")
+        and candidate.bbox_pt[1] <= next_page.rect.y0 + max(85.0, 0.10 * next_page.rect.height)
+    ):
+        # A caption may resume on the next page with an explanatory clause
+        # such as "(Middle columns: ...)" after a complete sentence.
+        score += 3.0
     return score
 
 def _merge_cross_page_caption_continuations(
@@ -223,7 +230,7 @@ def _merge_cross_page_caption_continuations(
 
         next_page_number = current_page_number + 1
         next_page = document[next_page_number - 1]
-        top_limit = next_page.rect.y0 + max(90.0, 0.18 * next_page.rect.height)
+        top_limit = next_page.rect.y0 + max(180.0, 0.24 * next_page.rect.height)
         top_blocks = [
             block
             for block in page_blocks.get(next_page_number, [])
