@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
@@ -8,6 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+import fitz
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -271,6 +273,111 @@ class ImageBatchTests(unittest.TestCase):
         self.assertEqual(recovered["counts"]["queued"], 1)
         self.assertIsNone(recovered["items"][0]["started_at"])
         self.assertTrue(start_batch.called)
+
+    def test_original_pdf_and_highlighted_source_page_are_available(self) -> None:
+        job_id = "f" * 32
+        job_root = self.data_root / job_id
+        upload_dir = job_root / "upload"
+        figure_dir = job_root / "results" / "extracted" / "paper" / "figures"
+        panel_dir = job_root / "results" / "panels" / "figure_1"
+        upload_dir.mkdir(parents=True)
+        figure_dir.mkdir(parents=True)
+        panel_dir.mkdir(parents=True)
+
+        source_pdf = upload_dir / "paper.pdf"
+        document = fitz.open()
+        page = document.new_page(width=200, height=300)
+        page.draw_rect(fitz.Rect(20, 30, 180, 200), color=(0, 0, 0), width=1)
+        document.save(source_pdf)
+        document.close()
+
+        figure_path = figure_dir / "figure_1.png"
+        preview_path = panel_dir / "preview.png"
+        Image.new("RGB", (320, 340), "white").save(figure_path, dpi=(300, 300))
+        Image.new("RGB", (320, 340), "white").save(preview_path)
+        image_batch_app.write_json_atomic(
+            figure_dir / "figures_metadata.json",
+            {
+                "figures": [
+                    {
+                        "figure_id": "figure_1",
+                        "page_number": 1,
+                        "bbox_pt": [20, 30, 180, 200],
+                        "image_path": str(figure_path),
+                    }
+                ]
+            },
+        )
+        image_batch_app.initialize_editor_state(
+            job_id,
+            [
+                {
+                    "source": str(figure_path),
+                    "preview": str(preview_path),
+                    "figure_id": "figure_1",
+                    "labels": "",
+                    "detected_labels": "",
+                    "figure_constraints": {"expected_labels": []},
+                }
+            ],
+        )
+        image_batch_app.create_batch_state(
+            [
+                {
+                    "item_id": "i000001",
+                    "job_id": job_id,
+                    "filename": source_pdf.name,
+                    "source_path": str(source_pdf),
+                    "size_bytes": source_pdf.stat().st_size,
+                }
+            ],
+            concurrency=1,
+            source_kind="upload",
+            source_label="PDF review",
+        )
+        image_batch_app.write_json_atomic(
+            job_root / "job_result.json",
+            {
+                "job_id": job_id,
+                "message": "处理完成",
+                "metrics": {},
+                "records": [{"record_id": "r001", "page_number": 1}],
+                "documents": [],
+                "artifacts": [],
+            },
+        )
+
+        result = self.client.get(f"/api/jobs/{job_id}/result")
+        self.assertEqual(result.status_code, 200, result.text)
+        record = result.json()["records"][0]
+        self.assertTrue(record["source_pdf_available"])
+        self.assertEqual(record["source_pdf_url"], f"/api/jobs/{job_id}/source-pdf")
+        self.assertIn("source-page-preview", record["source_page_preview_url"])
+
+        pdf_response = self.client.get(f"/api/jobs/{job_id}/source-pdf")
+        self.assertEqual(pdf_response.status_code, 200, pdf_response.text)
+        self.assertEqual(pdf_response.headers["content-type"], "application/pdf")
+        self.assertTrue(pdf_response.headers["content-disposition"].startswith("inline"))
+        self.assertTrue(pdf_response.content.startswith(b"%PDF"))
+
+        preview_response = self.client.get(
+            f"/api/jobs/{job_id}/figures/r001/source-page-preview",
+            params={"dpi": 120},
+        )
+        self.assertEqual(preview_response.status_code, 200, preview_response.text)
+        self.assertEqual(preview_response.headers["content-type"], "image/png")
+        with Image.open(BytesIO(preview_response.content)) as preview:
+            self.assertEqual(preview.size, (334, 500))
+            red, green, blue = preview.convert("RGB").getpixel((33, 100))
+            self.assertGreater(red, 180)
+            self.assertLess(green, 100)
+            self.assertLess(blue, 100)
+
+        invalid_dpi = self.client.get(
+            f"/api/jobs/{job_id}/figures/r001/source-page-preview",
+            params={"dpi": 300},
+        )
+        self.assertEqual(invalid_dpi.status_code, 400)
 
     def test_manual_crop_keeps_automatic_and_manual_versions(self) -> None:
         job_id = "b" * 32

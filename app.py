@@ -15,10 +15,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
+import fitz
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 from pydantic import BaseModel
 
 
@@ -53,6 +54,7 @@ EDITOR_STATE_LOCK = threading.Lock()
 BATCH_STATE_LOCK = threading.Lock()
 TRAINING_COLLECTION_LOCK = threading.Lock()
 ACTIVE_BATCH_LOCK = threading.Lock()
+PAGE_PREVIEW_LOCK = threading.Lock()
 ACTIVE_BATCH_IDS: set[str] = set()
 # Empty in standalone mode.  The BioMat web server sets this to
 # ``/image-processing`` when mounting this FastAPI app as a sub-application.
@@ -1174,6 +1176,124 @@ def _add_batch_item_source_group(
     return item
 
 
+def _job_source_pdf(job_id: str) -> Path:
+    """Resolve the exact PDF recorded for a batch job without accepting a path."""
+    root = job_root(job_id)
+    with _batch_connection() as connection:
+        row = connection.execute(
+            "SELECT source_path FROM batch_items WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="该任务没有关联的原始 PDF")
+    source = Path(str(row["source_path"] or "")).expanduser().resolve()
+    if source.suffix.lower() != ".pdf" or not source.is_file():
+        raise HTTPException(status_code=404, detail="原始 PDF 不存在或已被移动")
+    inside_job = source.is_relative_to(root)
+    if not inside_job and PDF_SOURCE_ROOTS and _matching_pdf_source_root(source) is None:
+        raise HTTPException(status_code=403, detail="原始 PDF 已超出允许访问的目录")
+    return source
+
+
+def _figure_extraction_context(job_id: str, record_id: str) -> tuple[int, list[float]]:
+    """Return the source PDF page and extraction rectangle for one Figure."""
+    root = job_root(job_id)
+    state_path = root / EDITOR_STATE_NAME
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="该任务没有整图编辑状态") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="整图编辑状态损坏") from exc
+
+    figure = (state.get("figures") or {}).get(record_id)
+    if not isinstance(figure, dict):
+        raise HTTPException(status_code=404, detail="整图记录不存在")
+    figure_id = str(figure.get("figure_id") or "")
+    source_name = Path(str(figure.get("source_path") or "")).name
+    metadata_root = root / "results" / "extracted"
+    for metadata_path in sorted(metadata_root.rglob("figures_metadata.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for candidate in metadata.get("figures") or []:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_name = Path(str(candidate.get("image_path") or "")).name
+            if str(candidate.get("figure_id") or "") != figure_id and candidate_name != source_name:
+                continue
+            try:
+                page_number = int(candidate["page_number"])
+                bbox = [float(value) for value in candidate["bbox_pt"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if page_number > 0 and len(bbox) == 4 and bbox[2] > bbox[0] and bbox[3] > bbox[1]:
+                return page_number, bbox
+    raise HTTPException(status_code=404, detail="没有找到该整图在原 PDF 中的提取坐标")
+
+
+def _render_source_page_preview(
+    job_id: str,
+    record_id: str,
+    *,
+    dpi: int,
+) -> Path:
+    source_pdf = _job_source_pdf(job_id)
+    page_number, bbox = _figure_extraction_context(job_id, record_id)
+    root = job_root(job_id)
+    stat = source_pdf.stat()
+    cache_key = hashlib.sha1(
+        json.dumps(
+            [str(source_pdf), stat.st_size, stat.st_mtime_ns, page_number, bbox, dpi],
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    cache_dir = root / "source_page_previews"
+    cache_path = cache_dir / f"{record_id}_page_{page_number}_{dpi}dpi_{cache_key}.png"
+    if cache_path.is_file():
+        return cache_path
+
+    with PAGE_PREVIEW_LOCK:
+        if cache_path.is_file():
+            return cache_path
+        with fitz.open(source_pdf) as document:
+            if page_number > len(document):
+                raise HTTPException(status_code=404, detail="原始 PDF 页码已发生变化")
+            page = document[page_number - 1]
+            scale = dpi / 72.0
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+            source_rect = fitz.Rect(*bbox)
+            if page.rotation:
+                source_rect = source_rect * page.rotation_matrix
+            display_rect = source_rect * fitz.Matrix(scale, scale)
+            left = max(0, min(image.width - 1, round(display_rect.x0)))
+            top = max(0, min(image.height - 1, round(display_rect.y0)))
+            right = max(left + 1, min(image.width - 1, round(display_rect.x1)))
+            bottom = max(top + 1, min(image.height - 1, round(display_rect.y1)))
+            draw = ImageDraw.Draw(image)
+            line_width = max(3, round(min(image.size) / 350))
+            draw.rectangle((left, top, right, bottom), outline=(220, 38, 38), width=line_width)
+            label = "EXTRACTED FIGURE"
+            label_box = draw.textbbox((left, top), label)
+            label_height = label_box[3] - label_box[1] + 8
+            label_top = max(0, top - label_height)
+            label_width = label_box[2] - label_box[0] + 12
+            draw.rectangle(
+                (left, label_top, min(image.width - 1, left + label_width), top),
+                fill=(220, 38, 38),
+            )
+            draw.text((left + 6, label_top + 3), label, fill=(255, 255, 255))
+
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            temporary = cache_path.with_name(f".tmp_{cache_path.name}_{uuid.uuid4().hex[:8]}")
+            image.save(temporary, format="PNG", compress_level=3)
+            temporary.replace(cache_path)
+    return cache_path
+
+
 def _job_review_summary(job_id: str) -> dict[str, Any]:
     """Return lightweight annotation progress for the history navigation."""
     summary = {
@@ -1783,6 +1903,25 @@ def get_job_result(job_id: str) -> dict[str, Any]:
                         if record.get("annotation_mode") == "no_split"
                         else len(record.get("panel_targets", []))
                     )
+        try:
+            _job_source_pdf(job_id)
+            source_pdf_available = True
+        except HTTPException:
+            source_pdf_available = False
+        for record in payload.get("records", []):
+            try:
+                page_number = int(record.get("page_number") or 0)
+            except (TypeError, ValueError):
+                page_number = 0
+            record["source_pdf_available"] = source_pdf_available and page_number > 0
+            if record["source_pdf_available"]:
+                record["source_pdf_url"] = (
+                    f"{PUBLIC_PATH_PREFIX}/api/jobs/{job_id}/source-pdf"
+                )
+                record["source_page_preview_url"] = (
+                    f"{PUBLIC_PATH_PREFIX}/api/jobs/{job_id}/figures/"
+                    f"{record['record_id']}/source-page-preview"
+                )
         return payload
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail="任务结果损坏") from exc
@@ -2146,6 +2285,25 @@ def create_panel_understanding_version(
         "record_id": record_id,
         **serialize_panel_target(job_id, root, target),
     }
+
+
+@app.get("/api/jobs/{job_id}/source-pdf")
+def get_job_source_pdf(job_id: str) -> FileResponse:
+    source_pdf = _job_source_pdf(job_id)
+    return FileResponse(
+        source_pdf,
+        media_type="application/pdf",
+        filename=source_pdf.name,
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/api/jobs/{job_id}/figures/{record_id}/source-page-preview")
+def get_source_page_preview(job_id: str, record_id: str, dpi: int = 120) -> FileResponse:
+    if dpi < 72 or dpi > 180:
+        raise HTTPException(status_code=400, detail="原页预览 DPI 必须在 72～180 之间")
+    preview_path = _render_source_page_preview(job_id, record_id, dpi=dpi)
+    return FileResponse(preview_path, media_type="image/png")
 
 
 @app.get("/files/{job_id}/{relative_path:path}")

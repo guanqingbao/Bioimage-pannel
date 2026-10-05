@@ -65,6 +65,78 @@ const appBasePath = window.location.pathname
   .replace(/\/index\.html$/, '');
 const appUrl = path => `${appBasePath}${path}`;
 
+function installPdfReviewUi() {
+  const style = document.createElement('style');
+  style.textContent = `
+    .pdf-review-dialog { width: min(1500px, calc(100vw - 28px)); height: min(920px, calc(100vh - 28px)); max-width: none; max-height: none; padding: 0; overflow: hidden; border: 1px solid #cfd8d4; border-radius: 12px; color: #18201f; background: #f5f7f6; box-shadow: 0 28px 90px rgba(23,41,37,.3); }
+    .pdf-review-dialog::backdrop { background: rgba(24,32,31,.62); backdrop-filter: blur(3px); }
+    .pdf-review-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 78px; padding: 14px 18px 14px 22px; border-bottom: 1px solid #dfe5e3; background: #fff; }
+    .pdf-review-header > div { min-width: 0; }
+    .pdf-review-header span { color: #146b5c; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .pdf-review-header h2 { overflow: hidden; margin: 3px 0 0; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+    .pdf-review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1px; height: calc(100% - 134px); background: #dce3e0; }
+    .pdf-review-pane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; background: #edf1ef; }
+    .pdf-review-pane header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #dce3e0; background: #fff; }
+    .pdf-review-pane header strong { font-size: 12px; }
+    .pdf-review-pane header span { color: #71817e; font-size: 10px; }
+    .pdf-review-image-wrap { position: relative; display: grid; min-height: 0; place-items: center; overflow: auto; padding: 14px; }
+    .pdf-review-image-wrap img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 3px 16px rgba(23,41,37,.13); }
+    .pdf-review-status { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: #667672; background: #edf1ef; text-align: center; font-size: 12px; }
+    .pdf-review-status[hidden] { display: none; }
+    .pdf-review-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; height: 56px; padding: 10px 18px; border-top: 1px solid #dfe5e3; background: #fff; }
+    .pdf-review-footer span { color: #667672; font-size: 11px; }
+    .pdf-review-footer a { text-decoration: none; }
+    @media (max-width: 820px) {
+      .pdf-review-dialog { width: 100vw; height: 100vh; border: 0; border-radius: 0; }
+      .pdf-review-grid { grid-template-columns: 1fr; grid-template-rows: repeat(2, minmax(0, 1fr)); }
+    }
+  `;
+  document.head.append(style);
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'pdf-review-dialog';
+  dialog.setAttribute('aria-labelledby', 'pdfReviewTitle');
+  dialog.innerHTML = `
+    <div class="pdf-review-header">
+      <div><span>整图提取复核</span><h2 id="pdfReviewTitle">PDF 原页与提取整图对照</h2></div>
+      <button class="icon-button" type="button" data-close-pdf-review aria-label="关闭原页对照" title="关闭">${icon('x')}<span class="fallback-icon">×</span></button>
+    </div>
+    <div class="pdf-review-grid">
+      <section class="pdf-review-pane">
+        <header><strong>PDF 原始页面</strong><span id="pdfReviewPageLabel"></span></header>
+        <div class="pdf-review-image-wrap">
+          <img id="pdfReviewPageImage" alt="标出 Figure 提取区域的 PDF 原始页面">
+          <div id="pdfReviewPageStatus" class="pdf-review-status">正在渲染 PDF 原始页面…</div>
+        </div>
+      </section>
+      <section class="pdf-review-pane">
+        <header><strong>提取后的 300 DPI 整图</strong><span id="pdfReviewFigureSize"></span></header>
+        <div class="pdf-review-image-wrap">
+          <img id="pdfReviewFigureImage" alt="提取后的完整 Figure">
+        </div>
+      </section>
+    </div>
+    <div class="pdf-review-footer">
+      <span>红框表示实际提取区域；可据此检查是否裁少、裁多或匹配错误。</span>
+      <a id="pdfReviewOpenPdf" class="secondary-button" target="_blank" rel="noopener">在浏览器中打开原 PDF</a>
+    </div>`;
+  document.body.append(dialog);
+  dialog.querySelector('[data-close-pdf-review]').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) dialog.close();
+  });
+  return {
+    dialog,
+    title: dialog.querySelector('#pdfReviewTitle'),
+    pageLabel: dialog.querySelector('#pdfReviewPageLabel'),
+    pageImage: dialog.querySelector('#pdfReviewPageImage'),
+    pageStatus: dialog.querySelector('#pdfReviewPageStatus'),
+    figureImage: dialog.querySelector('#pdfReviewFigureImage'),
+    figureSize: dialog.querySelector('#pdfReviewFigureSize'),
+    openPdf: dialog.querySelector('#pdfReviewOpenPdf'),
+  };
+}
+
 let activeResult = null;
 let activeResultRoot = null;
 let activeEditorRecord = null;
@@ -78,6 +150,7 @@ let folderBrowserState = null;
 
 const icon = (name) => `<i data-lucide="${name}"></i>`;
 const refreshIcons = () => window.lucide?.createIcons();
+const pdfReviewUi = installPdfReviewUi();
 const scrollToBottom = () => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 
 function setSidebarCollapsed(collapsed) {
@@ -602,6 +675,10 @@ function renderFigureRecord(record, jobId, index) {
   const noSplit = verified && record.annotation_mode === 'no_split';
   const outputLabels = noSplit ? '无需划分' : (record.labels || '-');
   const panelCount = noSplit ? 0 : record.panel_count;
+  const sourceReviewActions = record.source_pdf_available
+    ? `<button class="source-page-compare-button secondary-button" type="button" data-job-id="${escapeHtml(jobId)}" data-record-id="${escapeHtml(record.record_id)}">原页对照</button>
+       <button class="source-pdf-button secondary-button" type="button" data-job-id="${escapeHtml(jobId)}" data-record-id="${escapeHtml(record.record_id)}">打开原 PDF</button>`
+    : '';
 
   return `
     <article class="figure-result-card" data-record-id="${escapeHtml(record.record_id)}">
@@ -635,6 +712,7 @@ function renderFigureRecord(record, jobId, index) {
           </dl>
           <div class="quality-flags">${flags}</div>
           <div class="figure-review-actions">
+            ${sourceReviewActions}
             <button class="edit-panel-button" type="button" data-job-id="${escapeHtml(jobId)}" data-record-id="${escapeHtml(record.record_id)}">在整图上框选修正</button>
             <button class="verify-figure-button" type="button" data-job-id="${escapeHtml(jobId)}" data-record-id="${escapeHtml(record.record_id)}"${verified ? ' disabled' : ''}>${verified && !noSplit ? '已校验完成' : '确认面板划分完成'}</button>
             <button class="no-split-figure-button secondary-button" type="button" data-job-id="${escapeHtml(jobId)}" data-record-id="${escapeHtml(record.record_id)}"${noSplit ? ' disabled' : ''}>${noSplit ? '整图无需划分' : '确认整图无需划分'}</button>
@@ -700,6 +778,51 @@ function renderResult(data) {
     </div>
     ${documentGroups}
   `;
+}
+
+function resultRecord(jobId, recordId) {
+  const result = resultSessions.get(jobId) || (activeResult?.job_id === jobId ? activeResult : null);
+  return result?.records?.find(record => record.record_id === recordId) || null;
+}
+
+function openSourcePdf(jobId, recordId) {
+  const record = resultRecord(jobId, recordId);
+  if (!record?.source_pdf_available) {
+    window.alert('该任务没有可访问的原始 PDF。');
+    return;
+  }
+  const url = `${record.source_pdf_url || appUrl(`/api/jobs/${jobId}/source-pdf`)}#page=${record.page_number || 1}`;
+  window.open(url, '_blank', 'noopener');
+}
+
+function openPdfReview(jobId, recordId) {
+  const record = resultRecord(jobId, recordId);
+  if (!record?.source_pdf_available) {
+    window.alert('该任务没有可访问的原始 PDF。');
+    return;
+  }
+  const pageNumber = Number(record.page_number || 1);
+  const pdfUrl = record.source_pdf_url || appUrl(`/api/jobs/${jobId}/source-pdf`);
+  const previewUrl = record.source_page_preview_url
+    || appUrl(`/api/jobs/${jobId}/figures/${recordId}/source-page-preview`);
+  pdfReviewUi.title.textContent = `${figureRecordTitle(record, 0)} · 原页对照`;
+  pdfReviewUi.pageLabel.textContent = `第 ${pageNumber} 页 · 红框为提取区域`;
+  pdfReviewUi.figureSize.textContent = `${record.whole_image_width_px} × ${record.whole_image_height_px}px`;
+  pdfReviewUi.openPdf.href = `${pdfUrl}#page=${pageNumber}`;
+  pdfReviewUi.pageStatus.hidden = false;
+  pdfReviewUi.pageStatus.textContent = '正在渲染 PDF 原始页面…';
+  pdfReviewUi.pageImage.removeAttribute('src');
+  pdfReviewUi.figureImage.src = record.whole_image_url;
+  pdfReviewUi.pageImage.onload = () => {
+    pdfReviewUi.pageStatus.hidden = true;
+  };
+  pdfReviewUi.pageImage.onerror = () => {
+    pdfReviewUi.pageStatus.hidden = false;
+    pdfReviewUi.pageStatus.textContent = '原页预览生成失败，请尝试直接打开原 PDF。';
+  };
+  pdfReviewUi.pageImage.src = `${previewUrl}?dpi=120`;
+  pdfReviewUi.dialog.showModal();
+  refreshIcons();
 }
 
 function updateFigureCarouselControls(carousel, requestedIndex) {
@@ -1200,6 +1323,16 @@ messages.addEventListener('click', event => {
   const openJobButton = event.target.closest('.open-job-button');
   if (openJobButton) {
     openJobResult(openJobButton.dataset.jobId);
+    return;
+  }
+  const sourcePageButton = event.target.closest('.source-page-compare-button');
+  if (sourcePageButton) {
+    openPdfReview(sourcePageButton.dataset.jobId, sourcePageButton.dataset.recordId);
+    return;
+  }
+  const sourcePdfButton = event.target.closest('.source-pdf-button');
+  if (sourcePdfButton) {
+    openSourcePdf(sourcePdfButton.dataset.jobId, sourcePdfButton.dataset.recordId);
     return;
   }
   const verifyButton = event.target.closest('.verify-figure-button');
